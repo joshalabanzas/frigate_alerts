@@ -78,7 +78,9 @@ async function downloadSnapshot(event) {
  * @returns {Promise<Buffer>}
  */
 async function downloadThumbnail(event) {
-    const url = `${FRIGATE_API_URL}/events/${event.id}/thumbnail.jpg`;
+    // Same as the snapshot: a review id has no thumbnail endpoint either, so
+    // use the detection id it carries.
+    const url = `${FRIGATE_API_URL}/events/${event.snapshot_id || event.id}/thumbnail.jpg`;
     const response = await axios.get(url, { responseType: "arraybuffer" });
     return Buffer.from(response.data, "binary");
 }
