@@ -86,6 +86,22 @@ async function downloadThumbnail(event) {
 }
 
 /**
+ * Download the review segment's own preview clip.
+ *
+ * Reviews have native media that plain events don't: one clip spanning the
+ * whole segment rather than a single detection's crop. The route takes the
+ * format as a QUERY param — /preview.mp4 and /preview.gif are both 404.
+ * Only reviews have it, so callers must check is_review first.
+ * @param {Object} event
+ * @returns {Promise<Buffer>}
+ */
+async function downloadReviewPreview(event) {
+    const url = `${FRIGATE_API_URL}/review/${event.id}/preview?format=mp4`;
+    const response = await axios.get(url, { responseType: "arraybuffer" });
+    return Buffer.from(response.data, "binary");
+}
+
+/**
  * Get ordered list of media download attempts for an event
  * @param {Object} event
  * @returns {Array<{download: Function, fileName: string, label: string}>}
@@ -102,6 +118,15 @@ function getMediaDownloaders(event) {
             fileName: "snapshot.jpg",
             label: "Snapshot",
         },
+        ...(event.is_review
+            ? [
+                  {
+                      download: () => downloadWithRetry(() => downloadReviewPreview(event), `Preview [${event.id}]`),
+                      fileName: "preview.mp4",
+                      label: "Preview",
+                  },
+              ]
+            : []),
         {
             download: () => downloadWithRetry(() => downloadThumbnail(event), `Thumbnail [${event.id}]`),
             fileName: "thumbnail.jpg",
