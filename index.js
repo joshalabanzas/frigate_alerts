@@ -10,14 +10,28 @@ const {
     isLabelAllowed,
     reloadConfig,
 } = require("./config");
-const { sendMediaAlertToGroups, sendTextAlertToGroups } = require("./telegram");
-const { fetchEvents, getMediaDownloaders, triggerWebhook } = require("./frigate");
+const {
+    sendMediaAlertToGroups,
+    sendTextAlertToGroups,
+    editMediaAlertInGroups,
+    editCaptionInGroups,
+} = require("./telegram");
+const {
+    fetchEvents,
+    getMediaDownloaders,
+    getFirstLookDownloaders,
+    triggerWebhook,
+} = require("./frigate");
 const { connect, disconnect } = require("./mqtt");
 const snooze = require("./snooze");
 const { startServer, setReloadConfigFn } = require("./server");
 
 const processedEvents = new Set();
 const pendingEvents = new Map();
+// event id -> Promise<handles[]> for the snapshot posted the instant the review
+// opened. Held as a promise so a review that closes fast still waits for the
+// send to finish rather than posting a second message.
+const firstLookSends = new Map();
 const MAX_PROCESSED_EVENTS = 1000;
 const EVENT_END_TIMEOUT_MS = 60000;
 
@@ -28,7 +42,10 @@ function pruneProcessedEvents() {
     if (processedEvents.size > MAX_PROCESSED_EVENTS) {
         const entries = [...processedEvents];
         const toRemove = entries.slice(0, entries.length - MAX_PROCESSED_EVENTS / 2);
-        toRemove.forEach((id) => processedEvents.delete(id));
+        toRemove.forEach((id) => {
+            processedEvents.delete(id);
+            firstLookSends.delete(id);
+        });
     }
 }
 
@@ -42,11 +59,13 @@ function handleMqttEvent(payload) {
 
     if (!event || !event.id) return;
 
-    if (type === "new") {
+    if (type === "new" || type === "update") {
         if (processedEvents.has(event.id)) return;
 
         if (!isLabelAllowed(event)) {
-            console.log(`🏷️ Event ${event.id} label "${event.label}" not allowed for ${event.camera}`);
+            if (type === "new") {
+                console.log(`🏷️ Event ${event.id} label "${event.label}" not allowed for ${event.camera}`);
+            }
             return;
         }
         if (snooze.shouldSnooze(event.camera, null)) {
@@ -54,11 +73,20 @@ function handleMqttEvent(payload) {
             return;
         }
         if (!shouldAlertAnyGroup(event)) {
-            console.log(`⏰ Event ${event.id} outside schedule for ${event.camera}`);
+            if (type === "new") {
+                console.log(`⏰ Event ${event.id} outside schedule for ${event.camera}`);
+            }
             return;
         }
 
-        console.log(`📡 New event: ${event.label} on ${event.camera} [${event.id}]`);
+        // Guarded: "update" lands here too, so an event whose "new" was dropped
+        // still gets a still, and a chatty one only gets one.
+        if (!firstLookSends.has(event.id)) {
+            console.log(`📡 ${type === "new" ? "New" : "Ongoing"} event: ${event.label} on ${event.camera} [${event.id}]`);
+            firstLookSends.set(event.id, sendFirstLook(event));
+        }
+
+        if (pendingEvents.has(event.id)) return;
 
         // Start timeout — if "end" doesn't arrive, process with snapshot
         const timer = setTimeout(() => {
@@ -89,6 +117,12 @@ function handleMqttEvent(payload) {
         pruneProcessedEvents();
 
         console.log(`🏁 Event ended: ${event.label} on ${event.camera} [${event.id}]`);
+
+        // Last resort: nothing went out earlier, so post the still now rather
+        // than making the group wait out the media delay and the download too.
+        if (!firstLookSends.has(event.id)) {
+            firstLookSends.set(event.id, sendFirstLook(event));
+        }
 
         // Delay to let clip finalize, then process
         setTimeout(() => processEvent(event), MEDIA_READY_DELAY_MS);
@@ -142,10 +176,12 @@ function handleMqttReview(payload) {
 
     const event = reviewToEvent(review);
 
-    if (type === "new") {
+    if (type === "new" || type === "update") {
         if (processedEvents.has(event.id)) return;
         if (!isLabelAllowed(event)) {
-            console.log(`🏷️ Review ${event.id} objects "${event.label}" not allowed for ${event.camera}`);
+            if (type === "new") {
+                console.log(`🏷️ Review ${event.id} objects "${event.label}" not allowed for ${event.camera}`);
+            }
             return;
         }
         if (snooze.shouldSnooze(event.camera, null)) {
@@ -153,11 +189,24 @@ function handleMqttReview(payload) {
             return;
         }
         if (!shouldAlertAnyGroup(event)) {
-            console.log(`⏰ Review ${event.id} outside schedule for ${event.camera}`);
+            if (type === "new") {
+                console.log(`⏰ Review ${event.id} outside schedule for ${event.camera}`);
+            }
             return;
         }
 
-        console.log(`📡 New review (${review.severity}): ${event.label} on ${event.camera} [${event.id}]`);
+        // Guarded because "update" lands here too: a review whose "new" was
+        // dropped still gets its first look, and a chatty one only gets one.
+        if (!firstLookSends.has(event.id)) {
+            console.log(`📡 ${type === "new" ? "New" : "Ongoing"} review (${review.severity}): ${event.label} on ${event.camera} [${event.id}]`);
+
+            // Post a still straight away so the group is told within seconds.
+            // The clip replaces it in place once the review closes, so this
+            // costs no extra message.
+            firstLookSends.set(event.id, sendFirstLook(event));
+        }
+
+        if (pendingEvents.has(event.id)) return;
 
         // Wait for the review to close so the detection list is complete. If it
         // never closes, fall back so an alert still goes out.
@@ -188,15 +237,24 @@ function handleMqttReview(payload) {
 
         console.log(`🏁 Review ended: ${event.label} on ${event.camera} [${event.id}] (${event.detection_count} detection(s))`);
 
+        // Last resort: if nothing went out earlier (every message before "end"
+        // was lost), post the still now rather than making the group wait out
+        // the media delay and the clip download too.
+        if (!firstLookSends.has(event.id)) {
+            firstLookSends.set(event.id, sendFirstLook(event));
+        }
+
         setTimeout(() => processEvent(event), MEDIA_READY_DELAY_MS);
     }
 }
 
 /**
- * Process a single Frigate event — download media and send alerts
+ * Build the alert caption.
  * @param {Object} event
+ * @param {string} stage - "first" while the event is still running, else "final"
+ * @returns {string}
  */
-async function processEvent(event) {
+function buildMessage(event, stage) {
     const schedule = getCameraSchedule(event.camera);
     const scheduleInfo = schedule.always_send
         ? "🔔 Always Send"
@@ -206,11 +264,54 @@ async function processEvent(event) {
         ? ` (${event.detection_count} detections)`
         : "";
 
-    const message = `🚨 <b>Frigate Alert!</b>
+    const footer = stage === "first"
+        ? "\n📸 Live snapshot — clip to follow"
+        : "";
+
+    return `🚨 <b>Frigate Alert!</b>
 📷 Camera: ${event.camera}
 📌 Object: ${event.label}${detail}
 ⏳ Time: ${new Date(event.start_time * 1000).toLocaleString()}
-${scheduleInfo}`;
+${scheduleInfo}${footer}`;
+}
+
+/**
+ * Post the immediate still for an event that has just started.
+ * @param {Object} event
+ * @returns {Promise<Array<{chatId: string, messageId: number}>>}
+ */
+async function sendFirstLook(event) {
+    const message = buildMessage(event, "first");
+
+    for (const { download, fileName, label } of getFirstLookDownloaders(event)) {
+        try {
+            const buffer = await download();
+            const handles = await sendMediaAlertToGroups(event, buffer, message, fileName);
+            if (handles.length) {
+                console.log(`⚡ First look (${label}) out for ${event.camera} [${event.id}]`);
+                return handles;
+            }
+        } catch (e) {
+            // Expected early in an event; fall through to the next source.
+        }
+    }
+
+    console.log(`⚠️ No first-look still available for ${event.camera} [${event.id}], waiting for clip`);
+    return [];
+}
+
+/**
+ * Process a single Frigate event — download media and send alerts.
+ *
+ * If a first-look still already went out, the clip REPLACES it via
+ * editMessageMedia so the alert stays one message in the group.
+ * @param {Object} event
+ */
+async function processEvent(event) {
+    const handles = await (firstLookSends.get(event.id) || Promise.resolve([]));
+    firstLookSends.delete(event.id);
+
+    const message = buildMessage(event, "final");
 
     triggerWebhook(event);
 
@@ -219,15 +320,25 @@ ${scheduleInfo}`;
     for (const { download, fileName, label } of downloaders) {
         try {
             const buffer = await download();
-            const sent = await sendMediaAlertToGroups(event, buffer, message, fileName);
-            if (sent) return;
-            console.log(`⚠️ ${label} downloaded but Telegram rejected it, trying next...`);
+            if (handles.length) {
+                if (await editMediaAlertInGroups(handles, buffer, message, fileName)) return;
+                console.log(`⚠️ ${label} downloaded but the edit was rejected, trying next...`);
+            } else {
+                const sent = await sendMediaAlertToGroups(event, buffer, message, fileName);
+                if (sent.length) return;
+                console.log(`⚠️ ${label} downloaded but Telegram rejected it, trying next...`);
+            }
         } catch (e) {
             console.log(`⚠️ ${label} download failed after retries, trying next...`);
         }
     }
 
     console.error("❌ All media types failed for event:", event.id);
+    if (handles.length) {
+        // The still is already in the group; say so rather than posting again.
+        await editCaptionInGroups(handles, message + "\n⚠️ (Clip unavailable)");
+        return;
+    }
     await sendTextAlertToGroups(event, message + "\n⚠️ (No media available)");
 }
 
@@ -237,8 +348,15 @@ ${scheduleInfo}`;
 async function catchUpMissedEvents() {
     try {
         console.log("🔍 Checking for missed events...");
-        const fiveMinutesAgo = Date.now() / 1000 - 5 * 60;
-        const events = await fetchEvents({ after: fiveMinutesAgo, limit: 50 });
+        // Kept deliberately short: anything older is history, and replaying it
+        // floods the group on every restart. CATCH_UP_SECONDS=0 disables it.
+        const window = Number(process.env.CATCH_UP_SECONDS ?? 90);
+        if (window <= 0) {
+            console.log("   Catch-up disabled");
+            return;
+        }
+        const since = Date.now() / 1000 - window;
+        const events = await fetchEvents({ after: since, limit: 50 });
 
         if (!events || events.length === 0) {
             console.log("   No recent events found");
