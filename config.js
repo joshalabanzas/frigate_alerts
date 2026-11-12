@@ -89,8 +89,12 @@ function getGroupNamesForCamera(cameraName) {
 
 /**
  * Get enabled groups that should receive alerts for a camera
+ *
+ * A group may also carry a thread_id (a topic in a forum group: its alerts
+ * go there instead of General) and labels (only those objects alert it, so
+ * one chat can have a topic for persons and another for cars).
  * @param {string} cameraName
- * @returns {Array<{name: string, chat_id: string}>}
+ * @returns {Array<{name: string, chat_id: string, thread_id: number|null, labels: Array<string>|null}>}
  */
 function getGroupsForCamera(cameraName) {
     const groupNames = getGroupNamesForCamera(cameraName);
@@ -100,8 +104,24 @@ function getGroupsForCamera(cameraName) {
         .map((name) => ({
             name,
             chat_id: config.groups[name]?.chat_id,
+            thread_id: Number(config.groups[name]?.thread_id) || null,
+            labels: config.groups[name]?.labels?.length ? config.groups[name].labels : null,
         }))
         .filter((g) => g.chat_id);
+}
+
+/**
+ * Check if an event's objects are among the ones a group takes
+ * @param {Object} event
+ * @param {{labels: Array<string>|null}} group
+ * @returns {boolean}
+ */
+function groupTakesLabel(event, group) {
+    if (!group.labels) return true; // No filter = every object
+    // Reviews carry several objects; events carry one. Either one matching is enough,
+    // so a review with a person and a car goes to both a persons and a cars topic.
+    const labels = event.labels?.length ? event.labels : [event.label];
+    return labels.some((label) => group.labels.includes(label));
 }
 
 /**
@@ -235,6 +255,7 @@ function getGroupsToAlert(event) {
     const allGroups = getGroupsForCamera(event.camera);
 
     return allGroups
+        .filter((group) => groupTakesLabel(event, group))
         .filter((group) => shouldAlertGroup(event.camera, group.name))
         .map((group) => ({
             ...group,

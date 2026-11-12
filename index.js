@@ -412,8 +412,10 @@ function printConfigSummary() {
         const schedule = group.schedule
             ? ` (${group.schedule.start_time} - ${group.schedule.end_time})`
             : " (uses default schedule)";
+        const topic = group.thread_id ? ` topic ${group.thread_id}` : "";
+        const labels = group.labels?.length ? ` [${group.labels.join(", ")} only]` : "";
         console.log(
-            `   ${status} ${name}: ${group.chat_id}${alwaysSend}${schedule}`
+            `   ${status} ${name}: ${group.chat_id}${topic}${labels}${alwaysSend}${schedule}`
         );
         if (group.description) {
             console.log(`      ${group.description}`);

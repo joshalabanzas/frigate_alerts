@@ -29,11 +29,13 @@ function mediaKind(fileName) {
  * Send a message to a specific Telegram chat
  * @param {string} chatId
  * @param {string} message
+ * @param {number|null} threadId - topic in a forum group, null for General
  */
-async function sendToTelegram(chatId, message) {
+async function sendToTelegram(chatId, message, threadId = null) {
     try {
         await axios.post(API("sendMessage"), {
             chat_id: chatId,
+            ...(threadId ? { message_thread_id: threadId } : {}),
             text: message || "",
             parse_mode: "HTML",
         });
@@ -52,14 +54,16 @@ async function sendToTelegram(chatId, message) {
  * @param {Buffer} buffer
  * @param {string} caption
  * @param {string} fileName
+ * @param {number|null} threadId - topic in a forum group, null for General
  * @returns {Promise<number|null>} message_id of the sent message, or null on failure
  */
-async function sendMediaToTelegram(chatId, buffer, caption, fileName) {
+async function sendMediaToTelegram(chatId, buffer, caption, fileName, threadId = null) {
     const { method, fieldName } = mediaKind(fileName);
 
     for (let attempt = 1; attempt <= MEDIA_RETRY_ATTEMPTS; attempt++) {
         const form = new FormData();
         form.append("chat_id", chatId);
+        if (threadId) form.append("message_thread_id", String(threadId));
         form.append(fieldName, buffer, { filename: fileName });
         if (caption) form.append("caption", caption);
         form.append("parse_mode", "HTML");
@@ -181,7 +185,7 @@ async function sendMediaAlertToGroups(event, mediaBuffer, message, fileName) {
     const results = await Promise.all(
         groups.map(async (group) => ({
             chatId: group.chat_id,
-            messageId: await sendMediaToTelegram(group.chat_id, mediaBuffer, message, fileName),
+            messageId: await sendMediaToTelegram(group.chat_id, mediaBuffer, message, fileName, group.thread_id),
         }))
     );
 
@@ -235,7 +239,7 @@ async function sendTextAlertToGroups(event, message) {
     );
 
     await Promise.all(
-        groups.map((group) => sendToTelegram(group.chat_id, message))
+        groups.map((group) => sendToTelegram(group.chat_id, message, group.thread_id))
     );
 }
 
