@@ -481,6 +481,30 @@ Create `config.json` (see `config.example.json` for a full example):
 }
 ```
 
+### Alert videos
+
+```json
+"video": {
+  "quality": "compressed",
+  "max_mb": 8,
+  "transcoder_socket": "/run/s24-transcode.sock"
+}
+```
+
+| Key | Default | Meaning |
+|---|---|---|
+| `quality` | `original` | `original` sends Frigate's clip as it is. `compressed` shrinks any clip over `max_mb` before it is sent. |
+| `max_mb` | `8` | The largest clip `compressed` sends unchanged. |
+| `transcoder_socket` | none | The UNIX socket of a transcoder that shrinks clips (on a sitebox, `s24-transcode.socket`). Without one nothing is shrunk. |
+| `timeout_seconds` | `120` | How long to wait for the transcoder. |
+
+A group can set its own `"video_quality": "original"` or `"compressed"`; groups sharing a chat share its file.
+Either way a clip over Telegram's 50 MB bot upload limit is shrunk, since Telegram would refuse it. If shrinking
+fails or takes too long, the original is sent, so no alert is lost.
+
+The transcoder protocol: connect, send one line `S24T1 <target bytes>`, then the clip, and close your side. The
+answer is the new MP4, or a line starting with `ERR`.
+
 ### Schedule Priority
 
 When resolving which schedule applies, the most specific rule wins:

@@ -17,6 +17,13 @@
         "review_severities": ["alert"]
     },
 
+    "_comment_video": "Alert videos: 'original' sends Frigate's clip as it is; 'compressed' shrinks clips over max_mb. A clip over Telegram's 50 MB limit is always shrunk. Needs a transcoder (transcoder_socket); without one, clips go out as they are. A group can set its own video_quality.",
+    "video": {
+        "quality": "original",
+        "max_mb": 8,
+        "transcoder_socket": null
+    },
+
     "default_schedule": {
         "start_time": "00:00",
         "end_time": "23:59",

@@ -24,6 +24,7 @@ const {
 } = require("./frigate");
 const { connect, disconnect } = require("./mqtt");
 const snooze = require("./snooze");
+const { videoPicker } = require("./video");
 const { startServer, setReloadConfigFn } = require("./server");
 
 const processedEvents = new Set();
@@ -320,11 +321,13 @@ async function processEvent(event) {
     for (const { download, fileName, label } of downloaders) {
         try {
             const buffer = await download();
+            // A clip goes to each chat at its video quality, shrunk if need be.
+            const media = fileName.endsWith(".mp4") ? videoPicker(buffer) : buffer;
             if (handles.length) {
-                if (await editMediaAlertInGroups(handles, buffer, message, fileName)) return;
+                if (await editMediaAlertInGroups(handles, media, message, fileName)) return;
                 console.log(`⚠️ ${label} downloaded but the edit was rejected, trying next...`);
             } else {
-                const sent = await sendMediaAlertToGroups(event, buffer, message, fileName);
+                const sent = await sendMediaAlertToGroups(event, media, message, fileName);
                 if (sent.length) return;
                 console.log(`⚠️ ${label} downloaded but Telegram rejected it, trying next...`);
             }
